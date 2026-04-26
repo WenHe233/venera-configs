@@ -7,7 +7,7 @@ class Nhentai extends ComicSource {
     // unique id of the source
     key = "nhentai"
 
-    version = "1.0.8"
+    version = "1.1.0"
 
     minAppVersion = "1.0.0"
 
@@ -39,6 +39,13 @@ class Nhentai extends ComicSource {
         registerWebsite: "https://nhentai.net/register/"
     }
 
+    toSafeString(value, fallback = "") {
+        if (value === null || value === undefined) {
+            return fallback
+        }
+        return String(value)
+    }
+
     /**
      * parse comic from html element
      * @param element {HtmlElement}
@@ -46,14 +53,14 @@ class Nhentai extends ComicSource {
      */
     parseComic(element) {
         let imgEl = element.querySelector("a > img");
-        let img = imgEl?.attributes?.["data-src"] || imgEl?.attributes?.["src"] || "";
-        let name = element.querySelector("div.caption")?.text || "";
+        let img = this.toSafeString(imgEl?.attributes?.["data-src"] || imgEl?.attributes?.["src"] || "", "");
+        let name = this.toSafeString(element.querySelector("div.caption")?.text || "", "");
         const regex = /\d+/g;
-        let href = element.querySelector("a")?.attributes?.["href"] || "";
+        let href = this.toSafeString(element.querySelector("a")?.attributes?.["href"] || "", "");
         let idMatch = href.match(regex);
-        let id = idMatch ? idMatch.join('') : "";
+        let id = this.toSafeString(idMatch ? idMatch.join('') : "", "");
         let lang = "Unknown";
-        let tags = element.attributes["data-tags"] || "";
+        let tags = this.toSafeString(element.attributes["data-tags"] || "", "");
         if (tags.includes("12227")) {
             lang = "English";
         } else if (tags.includes("6346")) {
@@ -71,7 +78,7 @@ class Nhentai extends ComicSource {
             id: id,
             title: name,
             subtitle: "",
-            cover: this.toAbsoluteMediaUrl(img, true),
+            cover: this.toSafeString(this.toAbsoluteMediaUrl(img, true), ""),
             tags: tagsRes,
             description: id,
             language: lang
@@ -154,12 +161,12 @@ class Nhentai extends ComicSource {
             }
         }
         return new Comic({
-            id: String(item.id),
-            title: item.english_title || item.japanese_title || String(item.id),
+            id: this.toSafeString(item.id, ""),
+            title: this.toSafeString(item.english_title || item.japanese_title || item.pretty_title || item.id, ""),
             subtitle: "",
-            cover: this.toAbsoluteMediaUrl(item.thumbnail, true),
+            cover: this.toSafeString(this.toAbsoluteMediaUrl(item.thumbnail || "", true), ""),
             tags: tagsRes,
-            description: String(item.id),
+            description: this.toSafeString(item.id, ""),
             language: lang
         })
     }
@@ -182,6 +189,36 @@ class Nhentai extends ComicSource {
         const hour = time.getHours()
         const minute = time.getMinutes()
         return `${year}-${month}-${day} ${hour}:${minute}`
+    }
+
+    buildCategorySearchQuery(category, param) {
+        let normalizedParam = (param || "tag").toLowerCase()
+        switch (normalizedParam) {
+            case "tags":
+                normalizedParam = "tag"
+                break
+            case "languages":
+                normalizedParam = "language"
+                break
+            case "artists":
+                normalizedParam = "artist"
+                break
+            case "characters":
+                normalizedParam = "character"
+                break
+            case "parodies":
+                normalizedParam = "parody"
+                break
+            case "groups":
+                normalizedParam = "group"
+                break
+            case "categories":
+                normalizedParam = "category"
+                break
+        }
+        let normalizedCategory = this.toSafeString(category, "").trim()
+        let escapedCategory = normalizedCategory.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"")
+        return `${normalizedParam}:\"${escapedCategory}\"`
     }
 
     tagNamespace(tagType) {
@@ -281,34 +318,49 @@ class Nhentai extends ComicSource {
 
             /**
              * load function
-             * @param page {number | null} - page number, null for `singlePageWithMultiPart` type
+             * @param index {number | null} - 0-based page index for `mixed` type
              * @returns {{}}
              */
-            load: async (page) => {
-                let url = this.baseUrl
-                if(page && page !== 1) {
-                    url = `${url}?page=${page}`
+            load: async (index) => {
+                let pageIndex = Number(index ?? 0)
+                if (!Number.isFinite(pageIndex) || pageIndex < 0) {
+                    pageIndex = 0
                 }
-                let res = await Network.get(url, {})
-                if(res.status !== 200) {
-                    throw "Invalid Status Code: " + res.status
+
+                let currentPage = pageIndex + 1
+                let recentRes = await Network.get(`${this.apiBaseUrl}/galleries?page=${currentPage}`, {})
+                if(recentRes.status !== 200) {
+                    throw "Invalid Status Code: " + recentRes.status
                 }
-                let doc = new HtmlDocument(res.body)
+
+                let recentData = JSON.parse(recentRes.body)
                 let data = []
-                if (url === this.baseUrl) {
+
+                if (pageIndex === 0) {
+                    let popularRes = await Network.get(`${this.apiBaseUrl}/galleries/popular?page=1`, {})
+                    if (popularRes.status === 200) {
+                        let popularData = JSON.parse(popularRes.body)
+                        let popular = (Array.isArray(popularData) ? popularData : (popularData.result || []))
+                            .map(e => this.parseComicFromApi(e))
+                        if (popular.length > 0) {
+                            data.push({
+                                title: "Popular",
+                                comics: popular,
+                            })
+                        }
+                    }
+
                     data.push({
-                        title: "Popular",
-                        comics: doc.querySelectorAll("div.container.index-container.index-popular > div.gallery").map(e => this.parseComic(e))
+                        title: "Recent",
+                        comics: this.parseComicListFromApi(recentData).comics,
                     })
+                } else {
+                    data.push(this.parseComicListFromApi(recentData).comics)
                 }
-                let latest = doc.querySelectorAll("div.container.index-container > div.gallery").map(e => this.parseComic(e))
-                if(url === this.baseUrl) {
-                    latest = latest.slice(data[0].comics.length)
-                }
-                data.push(latest)
+
                 return {
                     data: data,
-                    maxPage: 20000,
+                    maxPage: recentData.num_pages || 1,
                 }
             }
         }
@@ -357,23 +409,20 @@ class Nhentai extends ComicSource {
          * @returns {Promise<{comics: Comic[], maxPage: number}>}
          */
         load: async (category, param, options, page) => {
-            if(param) {
-                switch (param.toLowerCase()) {
-                    case 'tags': param = 'tag'; break;
-                    case 'languages': param = 'language'; break;
-                    case 'artists': param = 'artist'; break;
-                    case 'characters': param = 'character'; break;
-                    case 'parodies': param = 'parody'; break;
-                    case 'groups': param = 'group'; break;
-                    case 'categories': param = 'category'; break;
-                }
+            let sort = this.toSafeString(options[0] || "/", "/")
+                .replace(/^\//, "")
+                .replaceAll("/", "")
+                .replaceAll("@", "-")
+            if (!sort) {
+                sort = "date"
             }
-            category = category.replaceAll(" ", "-")
-            let sort = (options[0] || "popular").replaceAll("@", "-")
-            category = category.replaceAll('.', '-');
-            let url = `${this.baseUrl}/${param}/${encodeURIComponent(category)}${sort}?page=${page}`
+            let query = this.buildCategorySearchQuery(category, param)
+            let url = `${this.apiBaseUrl}/search?query=${encodeURIComponent(query)}&page=${page}&sort=${sort}`
             let res = await Network.get(url, {})
-            return this.parseComicList(res.body, 'category')
+            if (res.status !== 200) {
+                throw "Invalid Status Code: " + res.status
+            }
+            return this.parseComicListFromApi(JSON.parse(res.body))
         },
         // provide options for category comic loading
         optionList: [
@@ -450,6 +499,9 @@ class Nhentai extends ComicSource {
                 ? await Network.post(v2Url, headers, null)
                 : await this.deleteWithFallback(v2Url, headers)
             if(res.status !== 200) {
+                if (res.status === 401 || res.status === 403) {
+                    throw "Login expired"
+                }
                 // Fallback to legacy endpoint for cookie-based auth compatibility.
                 let info = await this.comic.loadInfo(comicId)
                 let token = info.csrfToken
@@ -462,7 +514,7 @@ class Nhentai extends ComicSource {
                 if (legacyRes.status === 200) {
                     return true
                 }
-                if (legacyRes.status === 401) {
+                if (legacyRes.status === 401 || legacyRes.status === 403) {
                     throw "Login expired"
                 }
                 throw "Invalid Status Code: " + legacyRes.status
@@ -489,7 +541,7 @@ class Nhentai extends ComicSource {
             let url = `${this.baseUrl}/favorites?page=${page}`
             let webRes = await Network.get(url, {})
             if(webRes.status !== 200) {
-                if (apiRes.status === 401 || webRes.status === 401) {
+                if (apiRes.status === 401 || apiRes.status === 403 || webRes.status === 401 || webRes.status === 403) {
                     throw "Login expired"
                 }
                 throw "Invalid Status Code: " + webRes.status
@@ -650,10 +702,19 @@ class Nhentai extends ComicSource {
         loadEp: async (comicId, epId) => {
             comicId = this.normalizeComicId(comicId)
 
-            let apiRes = await Network.get(`${this.apiBaseUrl}/galleries/${comicId}/pages`, {})
+            let apiRes = await Network.get(`${this.apiBaseUrl}/galleries/${comicId}`, {})
             if (apiRes.status === 200) {
                 let apiData = JSON.parse(apiRes.body)
                 let images = (apiData.pages || []).map(p => this.toAbsoluteMediaUrl(p.path, false))
+                if (images.length > 0) {
+                    return { images: images }
+                }
+            }
+
+            let pagesRes = await Network.get(`${this.apiBaseUrl}/galleries/${comicId}/pages`, {})
+            if (pagesRes.status === 200) {
+                let pagesData = JSON.parse(pagesRes.body)
+                let images = (pagesData.pages || []).map(p => this.toAbsoluteMediaUrl(p.path, false))
                 if (images.length > 0) {
                     return { images: images }
                 }
